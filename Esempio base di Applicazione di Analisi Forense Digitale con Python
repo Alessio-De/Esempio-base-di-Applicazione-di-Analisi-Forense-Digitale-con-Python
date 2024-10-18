@@ -1,0 +1,146 @@
+import os
+import hashlib
+import magic
+import exif
+from datetime import datetime
+import sqlite3
+import csv
+import argparse
+
+def calculate_file_hash(file_path, algorithm="sha256"):
+    """Calcola l'hash di un file."""
+    hash_obj = hashlib.new(algorithm)
+    with open(file_path, "rb") as file:
+        for chunk in iter(lambda: file.read(4096), b""):
+            hash_obj.update(chunk)
+    return hash_obj.hexdigest()
+
+def get_file_metadata(file_path):
+    """Ottiene i metadati di un file."""
+    stat = os.stat(file_path)
+    return {
+        "size": stat.st_size,
+        "created": datetime.fromtimestamp(stat.st_ctime),
+        "modified": datetime.fromtimestamp(stat.st_mtime),
+        "accessed": datetime.fromtimestamp(stat.st_atime),
+    }
+
+def get_file_type(file_path):
+    """Determina il tipo di file."""
+    return magic.from_file(file_path)
+
+def extract_exif_data(file_path):
+    """Estrae i dati EXIF da un'immagine."""
+    with open(file_path, 'rb') as img_file:
+        try:
+            img = exif.Image(img_file)
+            if img.has_exif:
+                return {
+                    "datetime": img.get("datetime", "N/A"),
+                    "gps_latitude": img.get("gps_latitude", "N/A"),
+                    "gps_longitude": img.get("gps_longitude", "N/A"),
+                    "make": img.get("make", "N/A"),
+                    "model": img.get("model", "N/A"),
+                }
+        except:
+            pass
+    return {}
+
+def analyze_file(file_path):
+    """Analizza un singolo file."""
+    result = {
+        "path": file_path,
+        "hash": calculate_file_hash(file_path),
+        "type": get_file_type(file_path),
+        **get_file_metadata(file_path),
+    }
+    
+    if file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+        result["exif"] = extract_exif_data(file_path)
+    
+    return result
+
+def scan_directory(directory):
+    """Scansiona una directory e analizza tutti i file."""
+    results = []
+    for root, _, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            results.append(analyze_file(file_path))
+    return results
+
+def save_to_database(results, db_path):
+    """Salva i risultati in un database SQLite."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS files
+                    (path TEXT PRIMARY KEY, hash TEXT, type TEXT, size INTEGER, 
+                    created TEXT, modified TEXT, accessed TEXT)''')
+    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS exif_data
+                    (file_path TEXT PRIMARY KEY, datetime TEXT, gps_latitude TEXT, 
+                    gps_longitude TEXT, make TEXT, model TEXT)''')
+    
+    for result in results:
+        cursor.execute('''INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                       (result['path'], result['hash'], result['type'], result['size'],
+                        result['created'], result['modified'], result['accessed']))
+        
+        if 'exif' in result and result['exif']:
+            cursor.execute('''INSERT OR REPLACE INTO exif_data VALUES (?, ?, ?, ?, ?, ?)''',
+                           (result['path'], result['exif'].get('datetime'), 
+                            result['exif'].get('gps_latitude'), result['exif'].get('gps_longitude'),
+                            result['exif'].get('make'), result['exif'].get('model')))
+    
+    conn.commit()
+    conn.close()
+
+def export_to_csv(results, csv_path):
+    """Esporta i risultati in un file CSV."""
+    with open(csv_path, 'w', newline='') as csvfile:
+        fieldnames = ['path', 'hash', 'type', 'size', 'created', 'modified', 'accessed',
+                      'exif_datetime', 'exif_gps_latitude', 'exif_gps_longitude', 'exif_make', 'exif_model']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        for result in results:
+            row = {
+                'path': result['path'],
+                'hash': result['hash'],
+                'type': result['type'],
+                'size': result['size'],
+                'created': result['created'],
+                'modified': result['modified'],
+                'accessed': result['accessed'],
+            }
+            if 'exif' in result:
+                row.update({
+                    'exif_datetime': result['exif'].get('datetime'),
+                    'exif_gps_latitude': result['exif'].get('gps_latitude'),
+                    'exif_gps_longitude': result['exif'].get('gps_longitude'),
+                    'exif_make': result['exif'].get('make'),
+                    'exif_model': result['exif'].get('model'),
+                })
+            writer.writerow(row)
+
+def main():
+    parser = argparse.ArgumentParser(description="Digital Forensics Analysis Tool")
+    parser.add_argument("directory", help="Directory to analyze")
+    parser.add_argument("--db", help="Path to save SQLite database", default="forensics.db")
+    parser.add_argument("--csv", help="Path to save CSV file", default="forensics_report.csv")
+    args = parser.parse_args()
+
+    print(f"Analyzing directory: {args.directory}")
+    results = scan_directory(args.directory)
+    
+    print(f"Saving results to database: {args.db}")
+    save_to_database(results, args.db)
+    
+    print(f"Exporting results to CSV: {args.csv}")
+    export_to_csv(results, args.csv)
+    
+    print("Analysis complete.")
+
+if __name__ == "__main__":
+    main()
